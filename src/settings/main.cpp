@@ -678,9 +678,6 @@ int main(int argc, char **argv) {
     QPushButton { min-height:26px; padding:0 14px; background:white; border:1px solid #d9d9d9; border-radius:4px; }
     QPushButton:hover { border-color:#23c891; }
     QPushButton#greenButton { color:white; background:#23c891; border-color:#23c891; min-height:28px; }
-    QTabBar#segments { background:#ededed; border-radius:7px; }
-    QTabBar#segments::tab { background:transparent; min-width:112px; height:26px; margin:2px; padding:0 4px; color:#888; }
-    QTabBar#segments::tab:selected { background:white; color:#202124; border-radius:5px; }
     QSlider::groove:horizontal { height:4px; border-radius:2px; background:#dedede; }
     QSlider::handle:horizontal { width:16px; margin:-7px 0; border:1px solid #c9c9c9; border-radius:8px; background:white; }
     QToolButton#closeButton { border:0; background:transparent; font-size:20px; color:#555; }
@@ -720,7 +717,7 @@ int main(int argc, char **argv) {
   auto *navigation = new QListWidget;
   navigation->setObjectName("navigation");
   navigation->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-  const QStringList navNames = {"输入",   "语音输入",  "常用语和剪贴板",
+  const QStringList navNames = {"输入",   "语音输入",  "常用语",
                                 "外观",   "快捷键",    "跨设备",
                                 "手机版", "升级和反馈"};
   const QStringList navIcons = {"input",     "voice",   "phrases", "appearance",
@@ -957,13 +954,6 @@ int main(int argc, char **argv) {
 
   auto phrases = page("", false);
   phrases.widget->layout()->setContentsMargins(20, 0, 22, 0);
-  auto *phraseTabs = segments({"常用语", "剪贴板"});
-  auto *tabRow = new QHBoxLayout;
-  tabRow->addStretch();
-  tabRow->addWidget(phraseTabs);
-  tabRow->addStretch();
-  phrases.body->addLayout(tabRow);
-  auto *phraseStack = new QStackedWidget;
   auto *common = new QWidget;
   auto *commonLayout = new QVBoxLayout(common);
   commonLayout->setContentsMargins(0, 0, 0, 0);
@@ -1054,19 +1044,7 @@ int main(int argc, char **argv) {
           reloadPhrases();
       });
   reloadPhrases();
-  phraseStack->addWidget(common);
-  auto *clipboard = new QWidget;
-  auto *clipboardLayout = new QVBoxLayout(clipboard);
-  clipboardLayout->setContentsMargins(0, 0, 0, 0);
-  clipboardLayout->addWidget(rowsCard({row(
-      "剪贴板", "复制的内容将在剪贴板中展示",
-      toggle(wetype::settingBool(settings.value("clipboard_enabled"), false),
-             true, "clipboard_enabled"))}));
-  clipboardLayout->addStretch();
-  phraseStack->addWidget(clipboard);
-  phrases.body->addWidget(phraseStack, 1);
-  QObject::connect(phraseTabs, &QTabBar::currentChanged, phraseStack,
-                   &QStackedWidget::setCurrentIndex);
+  phrases.body->addWidget(common, 1);
   pages->addWidget(phrases.widget);
 
   auto visual = page("外观", false);
@@ -1138,7 +1116,7 @@ int main(int argc, char **argv) {
                    "ai_assistant"),
        shortcutRow(
            "V 模式", wetype::settingBool(settings.value("v_mode"), true), {"V"},
-           "按「v」打开快捷功能栏，可使用计算、剪贴板、常用语、符号等功能",
+           "按「v」显示计算器、常用语、符号候选；选择常用语后在候选栏选词，菜单中按回车输入 v，继续输入可正常组词",
            true, "v_mode")}));
   shortcuts.body->addWidget(rowsCard(
       {row("语音输入", {}, nullptr, 44),

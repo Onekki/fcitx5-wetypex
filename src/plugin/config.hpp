@@ -104,11 +104,6 @@ FCITX_CONFIGURATION(
                                              VoicePunctuationMode::Smart};
     Option<bool> smartPolish{this, "SmartPolish", "语音智能整理", true};)
 
-FCITX_CONFIGURATION(PhraseClipboardConfig,
-                    Option<bool> clipboard{this, "Clipboard",
-                                           "在输入法剪贴板中展示复制内容",
-                                           false};)
-
 FCITX_CONFIGURATION(
     AppearanceConfig,
     Option<int, IntConstrain> candidateSize{this, "CandidateSize", "候选字大小",
@@ -215,8 +210,6 @@ FCITX_CONFIGURATION(UpdateConfig,
 FCITX_CONFIGURATION(
     WeTypeConfig, Option<InputConfig> input{this, "Input", "输入"};
     Option<VoiceConfig> voice{this, "Voice", "语音输入"};
-    Option<PhraseClipboardConfig> phrases{this, "PhrasesClipboard",
-                                          "常用语和剪贴板"};
     Option<AppearanceConfig> appearance{this, "Appearance", "外观"};
     Option<ShortcutConfig> shortcuts{this, "Shortcuts", "快捷键"};
     Option<DeviceConfig> devices{this, "Devices", "跨设备"};

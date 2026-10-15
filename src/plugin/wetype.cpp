@@ -2,7 +2,6 @@
 #include "config.hpp"
 #include <algorithm>
 #include <cerrno>
-#include <clipboard_public.h>
 #include <csignal>
 #include <fcitx-utils/capabilityflags.h>
 #include <fcitx-utils/event.h>
@@ -197,6 +196,7 @@ static size_t displayCursorForRaw(const std::string &raw,
     ++display;
   return display;
 }
+enum class VModeState { None, Menu, Calculator, Tool, Phrases };
 class WeType;
 struct DeferredKey {
   Key key;
@@ -206,6 +206,10 @@ struct DeferredKey {
 struct State : InputContextProperty {
   uint64_t id, epoch = 1, seq = 0, applied = 0, revision = 0, inputSeq = 0;
   uint64_t cloudPollUntil = 0, lastCloudPoll = 0;
+  // Sequence of the in-flight hotword_list request for the local phrases
+  // view; the hint string is local-only and never sent to the engine.
+  uint64_t vModePhraseSeq = 0;
+  std::string vModeStatus;
   int candidatePage = 0, candidateCursor = 0;
   std::string preedit;
   size_t cursor = 0;
@@ -217,7 +221,8 @@ struct State : InputContextProperty {
   uint8_t symbolAutoState = 0;
   bool doubleQuoteLeft = true, singleQuoteLeft = true;
   bool english = false, fullWidth = false, traditional = false,
-       englishPunctuation = false, vMode = false;
+       englishPunctuation = false;
+  VModeState vMode = VModeState::None;
   bool selectionPending = false;
   std::vector<DeferredKey> deferredKeys;
   bool active = false;
@@ -240,6 +245,28 @@ public:
   Word(WeType *e, std::string text, unsigned index, uint64_t revision)
       : CandidateWord(Text(text)), engine_(e), index_(index),
         revision_(revision) {}
+  void select(InputContext *ic) const override;
+};
+class VModeWord : public CandidateWord {
+  WeType *engine_;
+  unsigned index_;
+  uint64_t session_, epoch_;
+
+public:
+  VModeWord(WeType *e, std::string text, unsigned index, uint64_t session,
+            uint64_t epoch)
+      : CandidateWord(Text(text)), engine_(e), index_(index),
+        session_(session), epoch_(epoch) {}
+  void select(InputContext *ic) const override;
+};
+class PhraseWord : public CandidateWord {
+  WeType *engine_;
+  uint64_t session_, epoch_;
+
+public:
+  PhraseWord(WeType *e, std::string text, uint64_t session, uint64_t epoch)
+      : CandidateWord(Text(std::move(text))), engine_(e), session_(session),
+        epoch_(epoch) {}
   void select(InputContext *ic) const override;
 };
 class WeType : public InputMethodEngine {
@@ -297,8 +324,7 @@ class WeType : public InputMethodEngine {
   int pageSize_ = 5;
   int keyboard_ = 0;
   bool vertical_ = false, chinesePunctuation_ = true, slashPunctuation_ = true,
-       symbolAutoChange_ = true, clipboardEnabled_ = false,
-       networkEnabled_ = true;
+       symbolAutoChange_ = true, networkEnabled_ = true;
   wetype_config::WeTypeConfig config_;
   std::filesystem::path stateDirectory() const {
     const char *state = getenv("WETYPE_STATE_DIR"),
@@ -446,8 +472,6 @@ class WeType : public InputMethodEngine {
     slashPunctuation_ = !slash || json_object_get_boolean(slash);
     auto *symbolChange = wire::get(j.get(), "symbol_auto_change");
     symbolAutoChange_ = !symbolChange || json_object_get_boolean(symbolChange);
-    clipboardEnabled_ =
-        json_object_get_boolean(wire::get(j.get(), "clipboard_enabled"));
     networkEnabled_ =
         !json_object_get_boolean(wire::get(j.get(), "standalone"));
     auto *input = config_.input.mutableValue();
@@ -527,8 +551,6 @@ class WeType : public InputMethodEngine {
         json_object_get_boolean(wire::get(j.get(), "fuzzy_an_ai")));
     input->fuzzyEngOng.setValue(
         json_object_get_boolean(wire::get(j.get(), "fuzzy_eng_ong")));
-    auto *phrases = config_.phrases.mutableValue();
-    phrases->clipboard.setValue(clipboardEnabled_);
     auto *appearance = config_.appearance.mutableValue();
     appearance->pageSize.setValue(pageSize_);
     appearance->candidateSize.setValue(
@@ -675,8 +697,6 @@ class WeType : public InputMethodEngine {
     wire::put(json.get(), "candidate_size", int64_t(*appearance.candidateSize));
     wire::put(json.get(), "vertical", bool(*appearance.vertical));
     wire::put(json.get(), "theme_mode", int64_t(*appearance.theme));
-    wire::put(json.get(), "clipboard_enabled",
-              bool(config_.phrases->clipboard.value()));
     const auto &devices = *config_.devices;
     wire::put(json.get(), "device_clipboard_sync",
               bool(*devices.clipboardSync));
@@ -807,57 +827,12 @@ class WeType : public InputMethodEngine {
     startProcess({WETYPE_ACCOUNT_TOOL, "set-functions", std::to_string(group),
                   std::to_string(mask)});
   }
-  void recordClipboard(InputContext *ic) {
-    auto *addon = instance_->addonManager().addon("clipboard", true);
-    if (!addon)
-      return;
-    auto value = addon->call<IClipboard::clipboard>(ic);
-    if (value.empty() || value.size() > 16384)
-      return;
-    auto directory = stateDirectory();
-    std::error_code error;
-    std::filesystem::create_directories(directory, error);
-    if (error)
-      return;
-    chmod(directory.c_str(), 0700);
-    if (clipboardEnabled_) {
-      auto path = directory / "clipboard-history.json";
-      std::vector<std::string> entries{value};
-      std::ifstream input(path);
-      std::string bytes((std::istreambuf_iterator<char>(input)), {});
-      if (bytes.size() <= 1048576) {
-        auto old = wire::parse(bytes);
-        if (old && json_object_is_type(old.get(), json_type_array))
-          for (size_t i = 0;
-               i < json_object_array_length(old.get()) && entries.size() < 20;
-               ++i) {
-            auto *item = json_object_array_get_idx(old.get(), i);
-            if (!json_object_is_type(item, json_type_string))
-              continue;
-            std::string text = json_object_get_string(item);
-            if (text.size() <= 16384 &&
-                std::find(entries.begin(), entries.end(), text) ==
-                    entries.end())
-              entries.push_back(std::move(text));
-          }
-      }
-      auto array = wire::Json(json_object_new_array());
-      for (const auto &entry : entries)
-        json_object_array_add(array.get(), json_object_new_string_len(
-                                               entry.data(), entry.size()));
-      auto temporary = path;
-      temporary += ".tmp";
-      std::ofstream output(temporary, std::ios::trunc);
-      output << wire::dump(array.get()) << '\n';
-      output.close();
-      chmod(temporary.c_str(), 0600);
-      std::filesystem::rename(temporary, path, error);
-    }
-  }
   void startVoice(InputContext *ic, bool hold) {
     if (voiceRecording_ || ic->capabilityFlags().test(CapabilityFlag::Password))
       return;
     auto *s = state(ic);
+    if (s->vMode != VModeState::None)
+      cancelVMode(ic);
     if (!s->preedit.empty()) {
       send(ic, "reset");
       s->preedit.clear();
@@ -922,28 +897,169 @@ class WeType : public InputMethodEngine {
     vModeSession_ = vModeEpoch_ = 0;
     vModeToken_.clear();
   }
+  void closePreviousVModeWindow() {
+    if (!vModeSession_)
+      return;
+    const auto previous = contexts_.find(vModeSession_);
+    if (previous != contexts_.end() && previous->second.get())
+      cancelVMode(previous->second.get());
+    else
+      stopVModeWindow();
+  }
   void cancelVMode(InputContext *ic) {
     auto *s = state(ic);
     if (vModeSession_ == s->id)
       stopVModeWindow();
+    const bool calculator = s->vMode == VModeState::Calculator;
     ++s->epoch;
-    send(ic, "reset");
-    s->vMode = false;
+    if (calculator)
+      send(ic, "reset");
+    else {
+      // Local-only phases never reached the engine, so drop any reply still
+      // in flight instead of waiting for a transport round trip.
+      s->applied = s->seq;
+      s->inputSeq = 0;
+    }
+    s->vMode = VModeState::None;
+    s->selectionPending = false;
+    s->deferredKeys.clear();
+    s->cloudPollUntil = 0;
+    s->vModePhraseSeq = 0;
+    s->vModeStatus.clear();
     s->preedit.clear();
     s->cursor = 0;
     clearDisplayState(s);
     ic->inputPanel().reset();
     panel(ic, s);
   }
-  bool startVModeWindow(InputContext *ic) {
+  void showVModeMenu(InputContext *ic) {
     auto *s = state(ic);
-    if (vModeSession_) {
-      const auto previous = contexts_.find(vModeSession_);
-      if (previous != contexts_.end() && previous->second.get())
-        cancelVMode(previous->second.get());
-      else
-        stopVModeWindow();
+    closePreviousVModeWindow();
+    // A fresh epoch makes replies from the previous composition unusable, so
+    // a late "open"/reload response cannot overwrite the local action list.
+    ++s->epoch;
+    s->applied = s->seq;
+    s->inputSeq = 0;
+    s->selectionPending = false;
+    s->deferredKeys.clear();
+    s->cloudPollUntil = 0;
+    s->vModePhraseSeq = 0;
+    s->vModeStatus.clear();
+    s->candidatePage = s->candidateCursor = 0;
+    s->preedit = "v";
+    s->cursor = 1;
+    clearDisplayState(s);
+    s->vMode = VModeState::Menu;
+    static const char *const kActions[] = {"1. 计算器", "2. 常用语", "3. 符号"};
+    auto list = std::make_unique<CommonCandidateList>();
+    // The three local entries must stay on a single page regardless of the
+    // configured page size for engine candidates.
+    list->setPageSize(3);
+    list->setCursorPositionAfterPaging(CursorPositionAfterPaging::ResetToFirst);
+    list->setSelectionKey({});
+    list->setLayoutHint(vertical_ ? CandidateLayoutHint::Vertical
+                                  : CandidateLayoutHint::Horizontal);
+    for (unsigned i = 0; i < 3; ++i)
+      list->append<VModeWord>(this, std::string(kActions[i]), i, s->id,
+                              s->epoch);
+    list->setGlobalCursorIndex(0);
+    ic->inputPanel().setCandidateList(std::move(list));
+    panel(ic, s);
+  }
+  void showVModePhrases(InputContext *ic) {
+    auto *s = state(ic);
+    closePreviousVModeWindow();
+    // A fresh epoch drops any reply from an earlier composition so it cannot
+    // revive this local view or commit stale text.
+    ++s->epoch;
+    s->applied = s->seq;
+    s->inputSeq = 0;
+    s->selectionPending = false;
+    s->deferredKeys.clear();
+    s->cloudPollUntil = 0;
+    s->candidatePage = s->candidateCursor = 0;
+    s->preedit.clear();
+    s->cursor = 0;
+    clearDisplayState(s);
+    s->vMode = VModeState::Phrases;
+    s->vModePhraseSeq = 0;
+    s->vModeStatus = "正在加载常用语…";
+    ic->inputPanel().setCandidateList(nullptr);
+    panel(ic, s);
+    const bool sent = send(ic, "hotword_list");
+    // send() may have failed and cancelled this view through
+    // invalidateSessions(); never reopen a view that is already gone.
+    if (s->vMode != VModeState::Phrases)
+      return;
+    if (sent && child_ > 0) {
+      s->vModePhraseSeq = s->seq;
+    } else {
+      s->vModePhraseSeq = 0;
+      s->vModeStatus = "常用语加载失败，请稍后重试";
+      panel(ic, s);
     }
+  }
+  void applyPhrases(InputContext *ic, State *s, json_object *response) {
+    auto *hotwords = wire::get(response, "hotwords");
+    auto list = std::make_unique<CommonCandidateList>();
+    list->setPageSize(pageSize_);
+    list->setCursorPositionAfterPaging(CursorPositionAfterPaging::ResetToFirst);
+    // Page-local digit labels; the candidate text is the real phrase only.
+    list->setSelectionKey({Key("1"), Key("2"), Key("3"), Key("4"), Key("5"),
+                           Key("6"), Key("7"), Key("8"), Key("9")});
+    list->setLayoutHint(vertical_ ? CandidateLayoutHint::Vertical
+                                  : CandidateLayoutHint::Horizontal);
+    if (!wire::str(response, "error").empty() || !hotwords ||
+        !json_object_is_type(hotwords, json_type_array)) {
+      s->vModeStatus = "常用语加载失败，请稍后重试";
+      ic->inputPanel().setCandidateList(nullptr);
+      panel(ic, s);
+      return;
+    }
+    // Preserve the backend order; never filter by kind/flag, sort, dedupe or
+    // apply the core candidate display truncation.
+    for (size_t i = 0; i < json_object_array_length(hotwords); ++i) {
+      auto *row = json_object_array_get_idx(hotwords, i);
+      if (!json_object_is_type(row, json_type_object))
+        continue;
+      auto *words = wire::get(row, "words");
+      if (!words || !json_object_is_type(words, json_type_string))
+        continue;
+      std::string text = json_object_get_string(words);
+      if (text.empty())
+        continue;
+      list->append<PhraseWord>(this, std::move(text), s->id, s->epoch);
+    }
+    if (list->totalSize()) {
+      s->vModeStatus.clear();
+      s->candidatePage = 0;
+      s->candidateCursor = 0;
+      list->setPage(0);
+      list->setGlobalCursorIndex(0);
+      ic->inputPanel().setCandidateList(std::move(list));
+    } else {
+      s->vModeStatus = "暂无常用语，请在设置中添加";
+      ic->inputPanel().setCandidateList(nullptr);
+    }
+    panel(ic, s);
+  }
+  bool replayVModePrefix(InputContext *ic) {
+    auto *s = state(ic);
+    if (s->vMode != VModeState::Menu)
+      return true;
+    s->vMode = VModeState::None;
+    ic->inputPanel().setCandidateList(nullptr);
+    // Hand the stashed "v" to the engine exactly once, keeping the local
+    // preedit so the ongoing composition stays visible to the client.
+    if (!send(ic, "key", "v"))
+      return false;
+    s->cloudPollUntil = now(CLOCK_MONOTONIC) + 1500000;
+    panel(ic, s);
+    return true;
+  }
+  bool startVModeTool(InputContext *ic, const char *tool) {
+    auto *s = state(ic);
+    closePreviousVModeWindow();
     const auto &rect = ic->cursorRect();
     vModeSession_ = s->id;
     vModeEpoch_ = s->epoch;
@@ -951,8 +1067,9 @@ class WeType : public InputMethodEngine {
                   std::to_string(now(CLOCK_MONOTONIC)) + "-" +
                   std::to_string(++vModeGeneration_);
     std::vector<std::string> args{
-        WETYPE_VMODE, std::to_string(s->id), std::to_string(rect.left()),
-        std::to_string(rect.bottom()), std::to_string(s->epoch), vModeToken_};
+        WETYPE_VMODE, tool, std::to_string(s->id),
+        std::to_string(rect.left()), std::to_string(rect.bottom()),
+        std::to_string(s->epoch), vModeToken_};
     std::vector<char *> argv;
     for (auto &arg : args)
       argv.push_back(arg.data());
@@ -999,14 +1116,10 @@ class WeType : public InputMethodEngine {
       return;
     const auto action = wire::str(message.get(), "action");
     auto *s = state(ic);
-    if (!s->active || !s->vMode || s->epoch != epoch)
+    if (!s->active || s->vMode != VModeState::Tool || s->epoch != epoch)
       return;
     if (action == "cancel") {
       cancelVMode(ic);
-    } else if (action == "calculator") {
-      // Keep the original core's armed VModeV2 session for keyboard input.
-      stopVModeWindow();
-      panel(ic, s);
     } else if (action == "commit") {
       const auto text = wire::str(message.get(), "text");
       if (text.empty() || text.size() > 65536)
@@ -1030,8 +1143,8 @@ class WeType : public InputMethodEngine {
     const auto exited = waitpid(vModeChild_, nullptr, WNOHANG);
     if (exited == vModeChild_ || (exited < 0 && errno == ECHILD))
       vModeChild_ = -1;
-    if (vModeChild_ <= 0 || !ic->hasFocus() || !s->active || !s->vMode ||
-        s->epoch != vModeEpoch_ ||
+    if (vModeChild_ <= 0 || !ic->hasFocus() || !s->active ||
+        s->vMode != VModeState::Tool || s->epoch != vModeEpoch_ ||
         ic->capabilityFlags().test(CapabilityFlag::Password))
       cancelVMode(ic);
   }
@@ -1044,7 +1157,8 @@ class WeType : public InputMethodEngine {
     ic->inputPanel().setAuxUp(Text());
     const std::string displayed =
         !s->displayPreedit.empty() ? s->displayPreedit
-        : !s->vMode && *config_.input->mode == wetype_config::InputMode::Pinyin
+        : s->vMode == VModeState::None &&
+                  *config_.input->mode == wetype_config::InputMode::Pinyin
             ? formatPinyinPreedit(s->preedit)
             : s->preedit;
     // Text("") contains one empty segment and is not empty to Fcitx UI.
@@ -1064,10 +1178,18 @@ class WeType : public InputMethodEngine {
     // to see the composition in the input panel.
     ic->inputPanel().setPreedit(inlinePreedit ? Text() : text);
     Text status;
-    if (!displayed.empty() && (failed_ || !ready_))
+    // The phrases view is local: surface its loading/empty/error hint even
+    // with an empty preedit, and never claim the core is still starting.  The
+    // local action menu does not need the engine either.
+    if (s->vMode == VModeState::Phrases) {
+      if (!s->vModeStatus.empty())
+        status.append(s->vModeStatus);
+    } else if (s->vMode != VModeState::Menu && !displayed.empty() &&
+               (failed_ || !ready_)) {
       status.append(failed_ ? "WeTypeX 核心正在恢复…" : "WeTypeX 核心启动中…");
+    }
     ic->inputPanel().setAuxDown(status);
-    if (s->preedit.empty() && !s->vMode)
+    if (s->preedit.empty() && s->vMode == VModeState::None)
       ic->inputPanel().setCandidateList(nullptr);
     ic->updatePreedit();
     ic->updateUserInterface(UserInterfaceComponent::InputPanel);
@@ -1115,8 +1237,10 @@ class WeType : public InputMethodEngine {
         s->preedit.clear();
         s->cursor = 0;
         clearDisplayState(s);
-        s->vMode = false;
+        s->vMode = VModeState::None;
         s->cloudPollUntil = 0;
+        s->vModePhraseSeq = 0;
+        s->vModeStatus.clear();
         s->pendingPairKey = 0;
         s->pendingPairRight.clear();
         s->symbolAutoState = 0;
@@ -1352,6 +1476,19 @@ class WeType : public InputMethodEngine {
     if (!s->active || !ic->hasFocus() ||
         ic->capabilityFlags().test(CapabilityFlag::Password))
       return;
+    // Management responses carry "hotwords" and no "op"; they belong to the
+    // local phrases view and must never reach the composition path.
+    if (wire::get(j.get(), "hotwords")) {
+      if (s->vMode == VModeState::Phrases && seq == s->vModePhraseSeq) {
+        s->vModePhraseSeq = 0;
+        applyPhrases(ic, s, j.get());
+      }
+      return;
+    }
+    // The local action menu and phrases view own the input panel; a late
+    // reply from an earlier composition must not replace them.
+    if (s->vMode == VModeState::Menu || s->vMode == VModeState::Phrases)
+      return;
     auto *commits = wire::get(j.get(), "commits");
     if (commits && json_object_is_type(commits, json_type_array))
       for (size_t i = 0; i < json_object_array_length(commits); i++) {
@@ -1402,7 +1539,7 @@ class WeType : public InputMethodEngine {
     list->setLayoutHint(vertical_ ? CandidateLayoutHint::Vertical
                                   : CandidateLayoutHint::Horizontal);
     auto *candidates = wire::get(j.get(), "candidates");
-    if ((!s->preedit.empty() || s->vMode) && candidates &&
+    if ((!s->preedit.empty() || s->vMode != VModeState::None) && candidates &&
         json_object_is_type(candidates, json_type_array))
       for (size_t i = 0;
            i < std::min(size_t(50), json_object_array_length(candidates));
@@ -1576,8 +1713,10 @@ public:
     s->pendingPairKey = 0;
     s->pendingPairRight.clear();
     s->symbolAutoState = 0;
-    s->vMode = false;
+    s->vMode = VModeState::None;
     s->cloudPollUntil = 0;
+    s->vModePhraseSeq = 0;
+    s->vModeStatus.clear();
     ic->inputPanel().reset();
     if (child_ > 0)
       send(ic, "reset");
@@ -1591,8 +1730,66 @@ public:
     if (child_ > 0)
       send(e.inputContext(), "close");
   }
+  // Single entry point for mouse and keyboard selection of a local V mode
+  // action.  Stale candidates (wrong session/epoch) are ignored.
+  void selectVMode(InputContext *ic, unsigned index, uint64_t session,
+                   uint64_t epoch) {
+    const auto it = contexts_.find(session);
+    if (it == contexts_.end() || it->second.get() != ic)
+      return;
+    auto *s = state(ic);
+    if (s->id != session || s->vMode != VModeState::Menu ||
+        s->epoch != epoch || index > 2)
+      return;
+    if (!s->active || !ic->hasFocus() ||
+        ic->capabilityFlags().test(CapabilityFlag::Password))
+      return;
+    s->preedit.clear();
+    s->cursor = 0;
+    clearDisplayState(s);
+    ic->inputPanel().setCandidateList(nullptr);
+    if (index == 0) {
+      s->vMode = VModeState::Calculator;
+      // VModeV2 is armed by the core's pending-input callback for a literal
+      // "v", then activated through SessionOptions 0x11.
+      send(ic, "key", "v");
+      send(ic, "vmode");
+      panel(ic, s);
+      return;
+    }
+    if (index == 1) {
+      showVModePhrases(ic);
+      return;
+    }
+    s->vMode = VModeState::Tool;
+    // Drop the stashed "v" from the client composition before the tool view
+    // takes over; the tool never re-sends it to the engine.
+    panel(ic, s);
+    if (!startVModeTool(ic, "symbols"))
+      cancelVMode(ic);
+  }
+  // Selection of a local phrases candidate.  The text is passed by value so it
+  // is an independent copy made before cancelVMode() destroys the list.
+  void selectPhrase(InputContext *ic, std::string text, uint64_t session,
+                    uint64_t epoch) {
+    const auto it = contexts_.find(session);
+    if (it == contexts_.end() || it->second.get() != ic)
+      return;
+    auto *s = state(ic);
+    if (s->id != session || s->vMode != VModeState::Phrases ||
+        s->epoch != epoch)
+      return;
+    if (!s->active || !ic->hasFocus() ||
+        ic->capabilityFlags().test(CapabilityFlag::Password))
+      return;
+    cancelVMode(ic);
+    ic->commitString(text);
+  }
   void select(InputContext *ic, unsigned index, int64_t revision = -1) {
     auto *s = state(ic);
+    if (s->vMode == VModeState::Menu || s->vMode == VModeState::Phrases ||
+        s->vMode == VModeState::Tool)
+      return;
     if (s->selectionPending || !s->active || !ic->hasFocus() ||
         ic->capabilityFlags().test(CapabilityFlag::Password))
       return;
@@ -1605,7 +1802,7 @@ public:
     if (!send(ic, "select", "", index, revision))
       return;
     s->selectionPending = true;
-    s->vMode = false;
+    s->vMode = VModeState::None;
     ic->inputPanel().setCandidateList(nullptr);
     // Keep the current client preedit until the asynchronous select response
     // commits the chosen text.  Clearing it here races React/contenteditable
@@ -1616,6 +1813,22 @@ public:
   }
   bool selectByKey(InputContext *ic, int pageIndex = -1) {
     auto *s = state(ic);
+    if (s->vMode == VModeState::Menu || s->vMode == VModeState::Phrases) {
+      // Local candidates are dispatched through the candidate objects so that
+      // mouse and keyboard share one validated entry point.  The index is
+      // page-local, and size() bounds the current page so the last page
+      // cannot overflow.
+      auto *list = dynamic_cast<CommonCandidateList *>(
+          ic->inputPanel().candidateList().get());
+      if (!list)
+        return false;
+      const int index =
+          pageIndex < 0 ? std::max(list->cursorIndex(), 0) : pageIndex;
+      if (index < 0 || index >= list->size())
+        return false;
+      list->candidate(index).select(ic);
+      return true;
+    }
     if (pageIndex >= pageSize_)
       return false;
     if (s->selectionPending)
@@ -1645,6 +1858,75 @@ public:
         ic->inputPanel().setCandidateList(nullptr);
         panel(ic, s);
       }
+      return true;
+    }
+    return false;
+  }
+  // Shared paging / cursor-move / second-and-third-candidate handling for the
+  // engine candidate list and the local V mode views.  Returns true when the
+  // key was consumed.  Paging keys are consumed even without a list, up/down
+  // only with a list, and the second/third candidate shortcuts even without
+  // candidates, matching the original inline behaviour.
+  bool handleCandidateNavigation(InputContext *ic, State *s,
+                                 CommonCandidateList *list, const Key &key) {
+    auto sym = key.sym();
+    bool pageDown =
+        sym == FcitxKey_Page_Down ||
+        key.checkKeyList(instance_->globalConfig().defaultNextPage()) ||
+        key.checkKeyList(*config_.shortcuts->nextPageKeys) ||
+        (*config_.shortcuts->pageMinusEqual && sym == FcitxKey_equal) ||
+        (*config_.shortcuts->pageBrackets && sym == FcitxKey_bracketright) ||
+        (*config_.shortcuts->pageCommaPeriod && sym == FcitxKey_period) ||
+        (*config_.shortcuts->pageShiftTab &&
+         !key.states().test(KeyState::Shift) && sym == FcitxKey_Tab);
+    bool pageUp =
+        sym == FcitxKey_Page_Up ||
+        key.checkKeyList(instance_->globalConfig().defaultPrevPage()) ||
+        key.checkKeyList(*config_.shortcuts->previousPageKeys) ||
+        (*config_.shortcuts->pageMinusEqual && sym == FcitxKey_minus) ||
+        (*config_.shortcuts->pageBrackets && sym == FcitxKey_bracketleft) ||
+        (*config_.shortcuts->pageCommaPeriod && sym == FcitxKey_comma) ||
+        (*config_.shortcuts->pageShiftTab &&
+         key.states().test(KeyState::Shift) && sym == FcitxKey_Tab);
+    if (pageDown || pageUp) {
+      if (list) {
+        if (pageDown) {
+          if (list->hasNext())
+            list->next();
+        } else if (list->hasPrev())
+          list->prev();
+        s->candidatePage = list->currentPage();
+        s->candidateCursor = list->globalCursorIndex();
+        ic->updateUserInterface(UserInterfaceComponent::InputPanel);
+      }
+      return true;
+    }
+    const bool previousCandidate =
+        key.checkKeyList(instance_->globalConfig().defaultPrevCandidate()) ||
+        sym == FcitxKey_Up;
+    const bool nextCandidate =
+        key.checkKeyList(instance_->globalConfig().defaultNextCandidate()) ||
+        sym == FcitxKey_Down;
+    if (list && (previousCandidate || nextCandidate)) {
+      if (previousCandidate)
+        list->prevCandidate();
+      else
+        list->nextCandidate();
+      s->candidatePage = list->currentPage();
+      s->candidateCursor = list->globalCursorIndex();
+      ic->updateUserInterface(UserInterfaceComponent::InputPanel);
+      return true;
+    }
+    const bool configuredSecond =
+        key.checkKeyList(*config_.shortcuts->secondCandidateKeys);
+    const bool configuredThird =
+        key.checkKeyList(*config_.shortcuts->thirdCandidateKeys);
+    if (configuredSecond || configuredThird ||
+        (*config_.shortcuts->selectSemicolonQuote &&
+         (sym == FcitxKey_semicolon || sym == FcitxKey_apostrophe))) {
+      const unsigned pageIndex =
+          configuredSecond || sym == FcitxKey_semicolon ? 1 : 2;
+      selectByKey(ic, pageIndex);
       return true;
     }
     return false;
@@ -1680,7 +1962,8 @@ public:
         e.filterAndAccept();
         return;
       }
-      if (!s->preedit.empty() && s->modifierCandidate == sym &&
+      if ((!s->preedit.empty() || s->vMode == VModeState::Phrases) &&
+          s->modifierCandidate == sym &&
           ((*config_.shortcuts->selectCtrl && ctrlModifier) ||
            releasedConfiguredKey(*config_.shortcuts->secondCandidateKeys) ||
            releasedConfiguredKey(*config_.shortcuts->thirdCandidateKeys))) {
@@ -1709,6 +1992,13 @@ public:
           // commit asynchronously, so the preedit, cursor, display state and
           // epoch must stay untouched until receive() applies that response;
           // a reset here would drop the text or invalidate the reply.
+          // A stashed local "v" is handed to the engine first so "raw" can
+          // return it as plain text instead of arming the calculator.
+          if (s->vMode == VModeState::Menu && !replayVModePrefix(ic)) {
+            s->modifierCandidate = FcitxKey_None;
+            e.filterAndAccept();
+            return;
+          }
           if (!send(ic, "raw") || child_ <= 0) {
             // Transport failure: leave the composition alone and let the
             // existing restart/backoff path recover it.
@@ -1719,11 +2009,11 @@ public:
           s->selectionPending = true;
           if (vModeSession_ == s->id) {
             stopVModeWindow();
-            s->vMode = false;
+            s->vMode = VModeState::None;
           }
           ic->inputPanel().setCandidateList(nullptr);
         } else {
-          if (s->vMode)
+          if (s->vMode != VModeState::None)
             cancelVMode(ic);
           s->cursor = 0;
           clearDisplayState(s);
@@ -1791,7 +2081,7 @@ public:
       return;
     if (ic->capabilityFlags().test(CapabilityFlag::Password))
       return;
-    if (networkEnabled_ && !s->vMode && s->preedit.empty() &&
+    if (networkEnabled_ && s->vMode == VModeState::None && s->preedit.empty() &&
         *config_.shortcuts->aiAssistant &&
         key.checkKeyList(*config_.shortcuts->aiAssistantKeys)) {
       const auto &surrounding = ic->surroundingText();
@@ -1837,8 +2127,102 @@ public:
       return;
     }
     bool composing = !s->preedit.empty();
-    if (!composing)
-      recordClipboard(ic);
+    // The local V mode views own the input panel and must keep working even
+    // while the engine is restarting, so dispatch them before the failure
+    // early-return.
+    if (s->vMode == VModeState::Menu) {
+      auto *menu = dynamic_cast<CommonCandidateList *>(
+          ic->inputPanel().candidateList().get());
+      const bool menuPrevious =
+          key.checkKeyList(instance_->globalConfig().defaultPrevCandidate()) ||
+          sym == FcitxKey_Up;
+      const bool menuNext =
+          key.checkKeyList(instance_->globalConfig().defaultNextCandidate()) ||
+          sym == FcitxKey_Down;
+      if (sym == FcitxKey_Escape || sym == FcitxKey_BackSpace) {
+        cancelVMode(ic);
+        e.filterAndAccept();
+        return;
+      }
+      if (sym >= FcitxKey_1 && sym <= FcitxKey_3) {
+        selectByKey(ic, int(sym - FcitxKey_1));
+        e.filterAndAccept();
+        return;
+      }
+      if (sym == FcitxKey_space) {
+        selectByKey(ic);
+        e.filterAndAccept();
+        return;
+      }
+      if (sym == FcitxKey_Return || sym == FcitxKey_KP_Enter) {
+        // Return in the menu types a literal "v": a moved highlight is not a
+        // commitment, so it must never enter the highlighted action.
+        cancelVMode(ic);
+        ic->commitString("v");
+        e.filterAndAccept();
+        return;
+      }
+      if (menu && (menuPrevious || menuNext)) {
+        if (menuPrevious)
+          menu->prevCandidate();
+        else
+          menu->nextCandidate();
+        ic->updateUserInterface(UserInterfaceComponent::InputPanel);
+        e.filterAndAccept();
+        return;
+      }
+      if ((sym >= FcitxKey_0 && sym <= FcitxKey_9) ||
+          sym == FcitxKey_Left || sym == FcitxKey_Right ||
+          sym == FcitxKey_Home || sym == FcitxKey_End ||
+          sym == FcitxKey_Delete) {
+        // Keys the engine does not own yet are consumed without leaking a
+        // digit into the application or moving a cursor the stashed "v" has
+        // not reached.
+        e.filterAndAccept();
+        return;
+      }
+      // Any other printable key continues spelling: hand the stashed "v" to
+      // the engine once, then let this key take the normal input path.
+      if (sym >= 0x20 && sym <= 0x7e && !replayVModePrefix(ic)) {
+        e.filterAndAccept();
+        return;
+      }
+    }
+    if (s->vMode == VModeState::Phrases) {
+      if (sym == FcitxKey_Escape || sym == FcitxKey_BackSpace) {
+        cancelVMode(ic);
+        e.filterAndAccept();
+        return;
+      }
+      auto *phrases = dynamic_cast<CommonCandidateList *>(
+          ic->inputPanel().candidateList().get());
+      if (handleCandidateNavigation(ic, s, phrases, key)) {
+        e.filterAndAccept();
+        return;
+      }
+      if (sym == FcitxKey_space || sym == FcitxKey_Return ||
+          sym == FcitxKey_KP_Enter) {
+        // Selection keys are always consumed, even while the list is loading
+        // or empty, so no digit, space or newline leaks to the application.
+        selectByKey(ic);
+        e.filterAndAccept();
+        return;
+      }
+      if (sym >= FcitxKey_1 && sym <= FcitxKey_9) {
+        selectByKey(ic, int(sym - FcitxKey_1));
+        e.filterAndAccept();
+        return;
+      }
+      if (sym >= 0x20 && sym <= 0x7e) {
+        // Any other printable key starts a normal composition: drop the local
+        // view and let this same event take the normal input path.
+        cancelVMode(ic);
+        composing = !s->preedit.empty();
+      } else {
+        e.filterAndAccept();
+        return;
+      }
+    }
     if (failed_) {
       if (composing && sym == FcitxKey_Return) {
         ic->commitString(s->preedit);
@@ -1851,48 +2235,46 @@ public:
       }
       return;
     }
-    auto *list = dynamic_cast<CommonCandidateList *>(
-        ic->inputPanel().candidateList().get());
-    if (s->vMode &&
-        (sym == FcitxKey_Escape ||
-         (vModeSession_ == s->id &&
-          key.checkKeyList(*config_.shortcuts->vModeKeys)))) {
-      cancelVMode(ic);
-      e.filterAndAccept();
-      return;
-    }
-    if (!composing && !s->vMode && *config_.shortcuts->vMode &&
-        key.checkKeyList(*config_.shortcuts->vModeKeys)) {
-      // VModeV2 is armed by the core's pending-input callback for a literal
-      // "v", then activated through SessionOptions 0x11.
-      send(ic, "key", "v");
-      send(ic, "vmode");
-      s->vMode = true;
-      s->preedit.clear();
-      s->cursor = 0;
-      clearDisplayState(s);
-      ic->inputPanel().setCandidateList(nullptr);
-      panel(ic, s);
-      if (!startVModeWindow(ic))
+    if (s->vMode == VModeState::Calculator) {
+      if (sym == FcitxKey_Escape) {
         cancelVMode(ic);
-      e.filterAndAccept();
-      return;
-    }
-    if (s->vMode && sym >= 0x20 && sym <= 0x7e) {
-      if (vModeSession_ == s->id)
-        stopVModeWindow();
-      if (sym == FcitxKey_space) {
-        selectByKey(ic);
         e.filterAndAccept();
         return;
       }
-      std::string text(1, char(sym));
-      s->cursor = std::min(s->cursor, s->preedit.size());
-      s->preedit.insert(s->cursor, text);
-      ++s->cursor;
-      clearDisplayState(s);
-      send(ic, "key", text);
-      panel(ic, s);
+      if (sym >= 0x20 && sym <= 0x7e) {
+        if (sym == FcitxKey_space) {
+          selectByKey(ic);
+          e.filterAndAccept();
+          return;
+        }
+        std::string text(1, char(sym));
+        s->cursor = std::min(s->cursor, s->preedit.size());
+        s->preedit.insert(s->cursor, text);
+        ++s->cursor;
+        clearDisplayState(s);
+        send(ic, "key", text);
+        panel(ic, s);
+        e.filterAndAccept();
+        return;
+      }
+    }
+    if (s->vMode == VModeState::Tool) {
+      if (sym == FcitxKey_Escape) {
+        cancelVMode(ic);
+        e.filterAndAccept();
+        return;
+      }
+      if (sym >= 0x20 && sym <= 0x7e)
+        // Dismiss the tool view first, then treat this key as ordinary input
+        // without restoring the "v" the tool selection already consumed.
+        cancelVMode(ic);
+    }
+    auto *list = dynamic_cast<CommonCandidateList *>(
+        ic->inputPanel().candidateList().get());
+    if (!composing && s->vMode == VModeState::None &&
+        *config_.shortcuts->vMode &&
+        key.checkKeyList(*config_.shortcuts->vModeKeys)) {
+      showVModeMenu(ic);
       e.filterAndAccept();
       return;
     }
@@ -1932,70 +2314,11 @@ public:
       e.filterAndAccept();
       return;
     }
-    bool pageDown =
-        sym == FcitxKey_Page_Down ||
-        key.checkKeyList(instance_->globalConfig().defaultNextPage()) ||
-        key.checkKeyList(*config_.shortcuts->nextPageKeys) ||
-        (*config_.shortcuts->pageMinusEqual && sym == FcitxKey_equal) ||
-        (*config_.shortcuts->pageBrackets && sym == FcitxKey_bracketright) ||
-        (*config_.shortcuts->pageCommaPeriod && sym == FcitxKey_period) ||
-        (*config_.shortcuts->pageShiftTab &&
-         !key.states().test(KeyState::Shift) && sym == FcitxKey_Tab);
-    bool pageUp =
-        sym == FcitxKey_Page_Up ||
-        key.checkKeyList(instance_->globalConfig().defaultPrevPage()) ||
-        key.checkKeyList(*config_.shortcuts->previousPageKeys) ||
-        (*config_.shortcuts->pageMinusEqual && sym == FcitxKey_minus) ||
-        (*config_.shortcuts->pageBrackets && sym == FcitxKey_bracketleft) ||
-        (*config_.shortcuts->pageCommaPeriod && sym == FcitxKey_comma) ||
-        (*config_.shortcuts->pageShiftTab &&
-         key.states().test(KeyState::Shift) && sym == FcitxKey_Tab);
-    if (composing && (pageDown || pageUp)) {
-      if (list) {
-        if (pageDown) {
-          if (list->hasNext())
-            list->next();
-        } else if (list->hasPrev())
-          list->prev();
-        s->candidatePage = list->currentPage();
-        s->candidateCursor = list->globalCursorIndex();
-        ic->updateUserInterface(UserInterfaceComponent::InputPanel);
-      }
+    if (composing && handleCandidateNavigation(ic, s, list, key)) {
       e.filterAndAccept();
       return;
     }
-    const bool previousCandidate =
-        key.checkKeyList(instance_->globalConfig().defaultPrevCandidate()) ||
-        sym == FcitxKey_Up;
-    const bool nextCandidate =
-        key.checkKeyList(instance_->globalConfig().defaultNextCandidate()) ||
-        sym == FcitxKey_Down;
-    if (composing && list && (previousCandidate || nextCandidate)) {
-      if (previousCandidate)
-        list->prevCandidate();
-      else
-        list->nextCandidate();
-      s->candidatePage = list->currentPage();
-      s->candidateCursor = list->globalCursorIndex();
-      ic->updateUserInterface(UserInterfaceComponent::InputPanel);
-      e.filterAndAccept();
-      return;
-    }
-    const bool configuredSecond =
-        key.checkKeyList(*config_.shortcuts->secondCandidateKeys);
-    const bool configuredThird =
-        key.checkKeyList(*config_.shortcuts->thirdCandidateKeys);
-    if (composing &&
-        (configuredSecond || configuredThird ||
-         (*config_.shortcuts->selectSemicolonQuote &&
-          (sym == FcitxKey_semicolon || sym == FcitxKey_apostrophe)))) {
-      const unsigned pageIndex =
-          configuredSecond || sym == FcitxKey_semicolon ? 1 : 2;
-      selectByKey(ic, pageIndex);
-      e.filterAndAccept();
-      return;
-    }
-    if (composing && !s->vMode &&
+    if (composing && s->vMode == VModeState::None &&
         (sym == FcitxKey_space || (sym >= FcitxKey_1 && sym <= FcitxKey_9))) {
       const unsigned pageIndex =
           sym == FcitxKey_space ? 0 : unsigned(sym - FcitxKey_1);
@@ -2034,13 +2357,14 @@ public:
     }
     if (composing && (sym == FcitxKey_Escape || sym == FcitxKey_Return ||
                       sym == FcitxKey_KP_Enter)) {
-      if (s->vMode && sym != FcitxKey_Escape && list && list->totalSize()) {
+      if (s->vMode != VModeState::None && sym != FcitxKey_Escape && list &&
+          list->totalSize()) {
         selectByKey(ic);
         e.filterAndAccept();
         return;
       }
       send(ic, sym == FcitxKey_Escape ? "reset" : "raw");
-      s->vMode = false;
+      s->vMode = VModeState::None;
       if (sym == FcitxKey_Escape) {
         s->preedit.clear();
         s->cursor = 0;
@@ -2136,6 +2460,12 @@ public:
 };
 void Word::select(InputContext *ic) const {
   engine_->select(ic, index_, revision_);
+}
+void VModeWord::select(InputContext *ic) const {
+  engine_->selectVMode(ic, index_, session_, epoch_);
+}
+void PhraseWord::select(InputContext *ic) const {
+  engine_->selectPhrase(ic, text().stringAt(0), session_, epoch_);
 }
 class Factory : public AddonFactory {
   AddonInstance *create(AddonManager *m) override {

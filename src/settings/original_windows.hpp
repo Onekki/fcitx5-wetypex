@@ -16,7 +16,6 @@
 #include <QScrollArea>
 #include <QStandardPaths>
 #include <QSvgRenderer>
-#include <QTabBar>
 #include <QToolButton>
 #include <QWidget>
 
@@ -329,17 +328,6 @@ inline QPushButton *greenButton(const QString &text) {
   button->setObjectName("greenButton");
   button->setCursor(Qt::PointingHandCursor);
   return button;
-}
-
-inline QTabBar *segments(const QStringList &labels) {
-  auto *tabs = new QTabBar;
-  tabs->setObjectName("segments");
-  tabs->setExpanding(true);
-  tabs->setDrawBase(false);
-  for (const auto &label : labels)
-    tabs->addTab(label);
-  tabs->setFixedSize(248, 30);
-  return tabs;
 }
 
 } // namespace original_ui
