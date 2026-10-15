@@ -1702,17 +1702,36 @@ public:
           ((shiftModifier && *config_.shortcuts->shiftSwitch) ||
            (ctrlModifier && *config_.shortcuts->ctrlSwitch) ||
            configuredLanguageSwitch)) {
-        if (s->vMode)
-          cancelVMode(ic);
-        if (!s->preedit.empty())
-          send(ic, "reset");
-        s->preedit.clear();
-        s->cursor = 0;
-        clearDisplayState(s);
+        if (!s->preedit.empty()) {
+          // Language switching with a live composition commits the original
+          // keystrokes first, exactly like Enter on a composition without
+          // candidates, then flips the mode.  The "raw" reply delivers the
+          // commit asynchronously, so the preedit, cursor, display state and
+          // epoch must stay untouched until receive() applies that response;
+          // a reset here would drop the text or invalidate the reply.
+          if (!send(ic, "raw") || child_ <= 0) {
+            // Transport failure: leave the composition alone and let the
+            // existing restart/backoff path recover it.
+            s->modifierCandidate = FcitxKey_None;
+            e.filterAndAccept();
+            return;
+          }
+          s->selectionPending = true;
+          if (vModeSession_ == s->id) {
+            stopVModeWindow();
+            s->vMode = false;
+          }
+          ic->inputPanel().setCandidateList(nullptr);
+        } else {
+          if (s->vMode)
+            cancelVMode(ic);
+          s->cursor = 0;
+          clearDisplayState(s);
+          ic->inputPanel().reset();
+        }
         s->english = !s->english;
         s->symbolAutoState = 0;
         s->modifierCandidate = FcitxKey_None;
-        ic->inputPanel().reset();
         panel(ic, s);
         e.filterAndAccept();
       }
