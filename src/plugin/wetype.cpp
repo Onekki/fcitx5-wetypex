@@ -220,8 +220,7 @@ struct State : InputContextProperty {
   std::string pendingPairRight;
   uint8_t symbolAutoState = 0;
   bool doubleQuoteLeft = true, singleQuoteLeft = true;
-  bool english = false, fullWidth = false, traditional = false,
-       englishPunctuation = false;
+  bool fullWidth = false, traditional = false, englishPunctuation = false;
   VModeState vMode = VModeState::None;
   bool selectionPending = false;
   std::vector<DeferredKey> deferredKeys;
@@ -325,6 +324,11 @@ class WeType : public InputMethodEngine {
   int keyboard_ = 0;
   bool vertical_ = false, chinesePunctuation_ = true, slashPunctuation_ = true,
        symbolAutoChange_ = true, networkEnabled_ = true;
+  // Current Chinese/English mode, shared by every input context for the
+  // lifetime of this plugin instance. Seeded once from the saved default at
+  // construction; window switches, config reloads and backend restarts keep
+  // the user's last manual choice.
+  bool english_ = false;
   wetype_config::WeTypeConfig config_;
   std::filesystem::path stateDirectory() const {
     const char *state = getenv("WETYPE_STATE_DIR"),
@@ -1586,6 +1590,8 @@ public:
           return new State(++nextId_, ic);
         }) {
     reloadSettings();
+    english_ = *config_.input->defaultLanguage ==
+               wetype_config::DefaultLanguage::English;
     instance_->inputContextManager().registerProperty("wetypexState",
                                                       &factory_);
     settingsAction_.setShortText("WeTypeX 设置");
@@ -1690,8 +1696,6 @@ public:
     auto *ic = e.inputContext();
     auto *current = state(ic);
     current->active = true;
-    current->english = *config_.input->defaultLanguage ==
-                       wetype_config::DefaultLanguage::English;
     current->traditional = false;
     ic->statusArea().addAction(StatusGroup::InputMethod, &settingsAction_);
     if (ic->capabilityFlags().test(CapabilityFlag::Password))
@@ -2019,7 +2023,7 @@ public:
           clearDisplayState(s);
           ic->inputPanel().reset();
         }
-        s->english = !s->english;
+        english_ = !english_;
         s->symbolAutoState = 0;
         s->modifierCandidate = FcitxKey_None;
         panel(ic, s);
@@ -2110,7 +2114,7 @@ public:
         }
       }
     }
-    if (s->english) {
+    if (english_) {
       if (sym >= 0x20 && sym <= 0x7e) {
         const char ascii = char(sym);
         const auto *entry = punctuationEntry(ascii);

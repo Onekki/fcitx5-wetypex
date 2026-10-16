@@ -855,7 +855,8 @@ int main(int argc, char **argv) {
        row("符号自动补全", "自动补全成对符号的右半部分",
            toggle(wetype::settingBool(settings.value("symbol_auto_pair"), true),
                   true, "symbol_auto_pair")),
-       row("默认输入语言（中文/英文）", {}, languageSetup, 52),
+       row("默认输入语言（中文/英文）",
+           "仅在 Fcitx5 启动时生效，切换窗口保持当前语言", languageSetup, 62),
        row("模糊拼音", {}, fuzzySetup, 52)}));
   input.body->addWidget(rowsCard(
       {row("单机模式",

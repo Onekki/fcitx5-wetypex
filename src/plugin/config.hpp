@@ -58,7 +58,7 @@ FCITX_CONFIGURATION(
                                   true};
     Option<bool> symbolAutoPair{this, "SymbolAutoPair", "符号自动补全", true};
     Option<DefaultLanguage> defaultLanguage{
-        this, "DefaultLanguage", "默认输入语言", DefaultLanguage::Chinese};
+        this, "DefaultLanguage", "启动时默认输入语言", DefaultLanguage::Chinese};
     Option<bool> fuzzyNl{this, "FuzzyNl", "模糊拼音 n/l", false};
     Option<bool> fuzzyRl{this, "FuzzyRl", "模糊拼音 r/l", false};
     Option<bool> fuzzyHf{this, "FuzzyHf", "模糊拼音 h/f", false};
