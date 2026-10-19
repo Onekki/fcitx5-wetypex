@@ -1082,17 +1082,27 @@ int main(int argc, char **argv) {
                                                                      : 1;
   theme->setCurrentIndex(themeMode);
   visual.body->addWidget(rowsCard({row("主题模式", {}, theme, 48)}));
+  auto *candidateLabelStyle = new QComboBox;
+  candidateLabelStyle->addItems({"微信风格", "Fcitx 默认"});
+  candidateLabelStyle->setCurrentIndex(
+      std::clamp(settings.value("candidate_label_style").toInt(0), 0, 1));
+  visual.body->addWidget(rowsCard(
+      {row("候选序号样式", {}, candidateLabelStyle, 48)}));
   auto *appearanceStatus = new QLabel;
   appearanceStatus->setObjectName("rowSubtitle");
   visual.body->addWidget(appearanceStatus);
   auto applyVisual = [=] {
     writeSetting("candidate_size", candidateSize->value());
     writeSetting("theme_mode", theme->currentIndex());
+    writeSetting("candidate_label_style", candidateLabelStyle->currentIndex());
     applyClassicTheme(theme->currentIndex(), candidateSize->value(),
                       appearanceStatus);
   };
   QObject::connect(candidateSize, &QSlider::sliderReleased, applyVisual);
   QObject::connect(theme, qOverload<int>(&QComboBox::currentIndexChanged),
+                   [=](int) { applyVisual(); });
+  QObject::connect(candidateLabelStyle,
+                   qOverload<int>(&QComboBox::currentIndexChanged),
                    [=](int) { applyVisual(); });
   pages->addWidget(visual.widget);
 

@@ -23,6 +23,8 @@ ${XDG_CONFIG_HOME:-$HOME/.config}/fcitx5/wetypex.json
 - 每页候选：3–9。
 - 排列方式：横排或竖排。
 - 主题：跟随系统、浅色、深色。
+- 候选序号：微信风格将序号紧贴候选词显示；Fcitx 默认交由主题绘制
+  `1. 候选` 标签并保留主题定义的间距。
 
 外观设置会更新 Fcitx5 Classic UI 的 WeTypeX 主题项。其他输入法共用同一个 Classic UI 时，主题切换也会影响其候选窗口。
 

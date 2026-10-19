@@ -27,6 +27,8 @@ enum class DefaultLanguage { Chinese, English };
 FCITX_CONFIG_ENUM_NAME(DefaultLanguage, "中文", "英文")
 enum class ThemeMode { System, Light, Dark };
 FCITX_CONFIG_ENUM_NAME(ThemeMode, "跟随系统", "浅色", "深色")
+enum class CandidateLabelStyle { WeChat, Fcitx };
+FCITX_CONFIG_ENUM_NAME(CandidateLabelStyle, "微信风格", "Fcitx 默认")
 enum class VoicePunctuationMode { Smart, Full, NoPeriod, Spaces };
 FCITX_CONFIG_ENUM_NAME(VoicePunctuationMode, "智能标点", "添加完整标点",
                        "句末不加句号", "空格替换标点")
@@ -111,7 +113,10 @@ FCITX_CONFIGURATION(
     Option<int, IntConstrain> pageSize{this, "PageSize", "每页候选数", 5,
                                        IntConstrain(3, 9)};
     Option<bool> vertical{this, "Vertical", "候选词竖排", false};
-    Option<ThemeMode> theme{this, "Theme", "主题模式", ThemeMode::System};)
+    Option<ThemeMode> theme{this, "Theme", "主题模式", ThemeMode::System};
+    Option<CandidateLabelStyle> candidateLabelStyle{
+        this, "CandidateLabelStyle", "候选序号样式",
+        CandidateLabelStyle::WeChat};)
 
 FCITX_CONFIGURATION(
     ShortcutConfig, Option<bool> shiftSwitch{this, "ShiftSwitch",

@@ -322,6 +322,8 @@ class WeType : public InputMethodEngine {
   }
   int pageSize_ = 5;
   int keyboard_ = 0;
+  wetype_config::CandidateLabelStyle candidateLabelStyle_ =
+      wetype_config::CandidateLabelStyle::WeChat;
   bool vertical_ = false, chinesePunctuation_ = true, slashPunctuation_ = true,
        symbolAutoChange_ = true, networkEnabled_ = true;
   // Current Chinese/English mode, shared by every input context for the
@@ -470,6 +472,9 @@ class WeType : public InputMethodEngine {
     pageSize_ = std::clamp(int(wire::number(j.get(), "page_size", 5)), 3, 9);
     keyboard_ = wire::number(j.get(), "keyboard", 0) == 5 ? 5 : 0;
     vertical_ = json_object_get_boolean(wire::get(j.get(), "vertical"));
+    candidateLabelStyle_ = static_cast<wetype_config::CandidateLabelStyle>(
+        std::clamp(int(wire::number(j.get(), "candidate_label_style", 0)), 0,
+                   1));
     auto *punctuation = wire::get(j.get(), "chinese_punctuation");
     chinesePunctuation_ = !punctuation || json_object_get_boolean(punctuation);
     auto *slash = wire::get(j.get(), "slash_punctuation");
@@ -562,6 +567,7 @@ class WeType : public InputMethodEngine {
     appearance->vertical.setValue(vertical_);
     appearance->theme.setValue(static_cast<wetype_config::ThemeMode>(
         std::clamp(int(wire::number(j.get(), "theme_mode", 0)), 0, 2)));
+    appearance->candidateLabelStyle.setValue(candidateLabelStyle_);
     auto *devices = config_.devices.mutableValue();
     devices->clipboardSync.setValue(
         json_object_get_boolean(wire::get(j.get(), "device_clipboard_sync")));
@@ -701,6 +707,8 @@ class WeType : public InputMethodEngine {
     wire::put(json.get(), "candidate_size", int64_t(*appearance.candidateSize));
     wire::put(json.get(), "vertical", bool(*appearance.vertical));
     wire::put(json.get(), "theme_mode", int64_t(*appearance.theme));
+    wire::put(json.get(), "candidate_label_style",
+              int64_t(*appearance.candidateLabelStyle));
     const auto &devices = *config_.devices;
     wire::put(json.get(), "device_clipboard_sync",
               bool(*devices.clipboardSync));
@@ -1537,9 +1545,14 @@ class WeType : public InputMethodEngine {
     auto list = std::make_unique<CommonCandidateList>();
     list->setPageSize(pageSize_);
     list->setCursorPositionAfterPaging(CursorPositionAfterPaging::ResetToFirst);
-    // The Windows candidate bar renders the page-local digit as part of each
-    // candidate ("1测试"), without Fcitx's default "1. 测试" label.
-    list->setSelectionKey({});
+    const bool fcitxLabels =
+        candidateLabelStyle_ == wetype_config::CandidateLabelStyle::Fcitx;
+    if (fcitxLabels)
+      list->setSelectionKey({Key("1"), Key("2"), Key("3"), Key("4"),
+                             Key("5"), Key("6"), Key("7"), Key("8"),
+                             Key("9")});
+    else
+      list->setSelectionKey({});
     list->setLayoutHint(vertical_ ? CandidateLayoutHint::Vertical
                                   : CandidateLayoutHint::Horizontal);
     auto *candidates = wire::get(j.get(), "candidates");
@@ -1551,9 +1564,10 @@ class WeType : public InputMethodEngine {
         auto *v = json_object_array_get_idx(candidates, i);
         if (json_object_is_type(v, json_type_string) &&
             json_object_get_string_len(v)) {
-          std::string display =
-              std::to_string(list->totalSize() % pageSize_ + 1);
-          display += json_object_get_string(v);
+          std::string display = json_object_get_string(v);
+          if (!fcitxLabels)
+            display.insert(
+                0, std::to_string(list->totalSize() % pageSize_ + 1));
           list->append<Word>(this, std::move(display), i, s->revision);
         }
       }
