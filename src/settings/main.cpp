@@ -1094,7 +1094,6 @@ int main(int argc, char **argv) {
   auto applyVisual = [=] {
     writeSetting("candidate_size", candidateSize->value());
     writeSetting("theme_mode", theme->currentIndex());
-    writeSetting("candidate_label_style", candidateLabelStyle->currentIndex());
     applyClassicTheme(theme->currentIndex(), candidateSize->value(),
                       appearanceStatus);
   };
@@ -1103,7 +1102,10 @@ int main(int argc, char **argv) {
                    [=](int) { applyVisual(); });
   QObject::connect(candidateLabelStyle,
                    qOverload<int>(&QComboBox::currentIndexChanged),
-                   [=](int) { applyVisual(); });
+                   [=](int index) {
+                     writeSetting("candidate_label_style", index);
+                     appearanceStatus->setText("候选序号样式已应用");
+                   });
   pages->addWidget(visual.widget);
 
   auto shortcuts = page("快捷键");
