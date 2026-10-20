@@ -2132,7 +2132,8 @@ public:
   }
   void deactivate(const InputMethodEntry &entry,
                   InputContextEvent &e) override {
-    auto *s = state(e.inputContext());
+    auto *ic = e.inputContext();
+    auto *s = state(ic);
     if (voiceSession_ == s->id)
       cancelVoice();
     if (e.type() == EventType::InputContextFocusOut && vModeSession_ == s->id &&
@@ -2143,6 +2144,14 @@ public:
       std::ofstream log(stateDirectory() / "vmode.log", std::ios::app);
       log << "V toolbar waiting up to 500ms for original input focus\n";
       return;
+    }
+    // A global Shift toggle has already consumed the key before the engine
+    // sees the release. Preserve the live composition as raw text when the
+    // input method is being switched away, matching desktop IME behavior.
+    if (s->active && !s->selectionPending &&
+        !ic->capabilityFlags().test(CapabilityFlag::Password) &&
+        !s->preedit.empty()) {
+      ic->commitString(s->preedit);
     }
     s->active = false;
     reset(entry, e);
