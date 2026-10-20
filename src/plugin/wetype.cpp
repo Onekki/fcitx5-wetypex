@@ -1743,7 +1743,17 @@ public:
   }
   void deactivate(const InputMethodEntry &entry,
                   InputContextEvent &e) override {
-    state(e.inputContext())->active = false;
+    auto *ic = e.inputContext();
+    auto *s = state(ic);
+    // A global Shift toggle has already consumed the key before the engine
+    // sees the release. Preserve the live composition as raw text when the
+    // input method is being switched away, matching desktop IME behavior.
+    if (s->active && !s->selectionPending &&
+        !ic->capabilityFlags().test(CapabilityFlag::Password) &&
+        !s->preedit.empty()) {
+      ic->commitString(s->preedit);
+    }
+    s->active = false;
     reset(entry, e);
     if (child_ > 0)
       send(e.inputContext(), "close");
