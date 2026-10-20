@@ -732,6 +732,7 @@ int main(int argc, char **argv) {
   deviceNotice->setFixedSize(8, 8);
   deviceNotice->setStyleSheet("background:#ff5151;border-radius:4px;");
   deviceNotice->move(179, 282);
+  deviceNotice->hide();
   deviceNotice->raise();
   root->addWidget(sidebar);
   auto *right = new QWidget;
@@ -1195,6 +1196,9 @@ int main(int argc, char **argv) {
   const bool syncAvailable =
       syncGroup > 0 &&
       !wetype::settingBool(settings.value("standalone"), false);
+  const bool syncError = syncState.value("error").toInt() != 0 ||
+                         syncState.value("service_error").toInt() != 0;
+  deviceNotice->setVisible(!syncAvailable || syncError);
   auto *deviceHero = new QWidget;
   auto *deviceHeroLayout = new QHBoxLayout(deviceHero);
   deviceHeroLayout->setContentsMargins(82, 0, 82, 0);
