@@ -225,6 +225,10 @@ struct State : InputContextProperty {
   bool selectionPending = false;
   std::vector<DeferredKey> deferredKeys;
   bool active = false;
+  bool preeditUpdateInitialized = false;
+  bool lastInlinePreedit = false;
+  std::string lastPreeditText;
+  int lastPreeditCursor = -1;
   KeySym modifierCandidate = FcitxKey_None;
   TrackableObjectReference<InputContext> ic;
   State(uint64_t n, InputContext &context) : id(n), ic(context.watch()) {}
@@ -234,6 +238,12 @@ static void clearDisplayState(State *state) {
   state->displayCursor = 0;
   state->editableBegin = 0;
   state->cursorStops.clear();
+}
+static void clearPreeditUpdateState(State *state) {
+  state->preeditUpdateInitialized = false;
+  state->lastInlinePreedit = false;
+  state->lastPreeditText.clear();
+  state->lastPreeditCursor = -1;
 }
 class Word : public CandidateWord {
   WeType *engine_;
@@ -1203,7 +1213,17 @@ class WeType : public InputMethodEngine {
     ic->inputPanel().setAuxDown(status);
     if (s->preedit.empty() && s->vMode == VModeState::None)
       ic->inputPanel().setCandidateList(nullptr);
-    ic->updatePreedit();
+    const int textCursor = text.cursor();
+    if (!s->preeditUpdateInitialized ||
+        s->lastInlinePreedit != inlinePreedit ||
+        s->lastPreeditText != text.toString() ||
+        s->lastPreeditCursor != textCursor) {
+      ic->updatePreedit();
+      s->preeditUpdateInitialized = true;
+      s->lastInlinePreedit = inlinePreedit;
+      s->lastPreeditText = text.toString();
+      s->lastPreeditCursor = textCursor;
+    }
     ic->updateUserInterface(UserInterfaceComponent::InputPanel);
   }
   void stop() {
@@ -1709,6 +1729,7 @@ public:
       stopSync();
     auto *ic = e.inputContext();
     auto *current = state(ic);
+    clearPreeditUpdateState(current);
     current->active = true;
     current->traditional = false;
     ic->statusArea().addAction(StatusGroup::InputMethod, &settingsAction_);
@@ -1728,6 +1749,7 @@ public:
     s->preedit.clear();
     s->cursor = 0;
     clearDisplayState(s);
+    clearPreeditUpdateState(s);
     s->pendingPairKey = 0;
     s->pendingPairRight.clear();
     s->symbolAutoState = 0;
@@ -1743,7 +1765,8 @@ public:
   }
   void deactivate(const InputMethodEntry &entry,
                   InputContextEvent &e) override {
-    state(e.inputContext())->active = false;
+    auto *s = state(e.inputContext());
+    s->active = false;
     reset(entry, e);
     if (child_ > 0)
       send(e.inputContext(), "close");
@@ -1765,6 +1788,7 @@ public:
     s->preedit.clear();
     s->cursor = 0;
     clearDisplayState(s);
+    clearPreeditUpdateState(s);
     ic->inputPanel().setCandidateList(nullptr);
     if (index == 0) {
       s->vMode = VModeState::Calculator;
