@@ -5,5 +5,5 @@ Category=InputMethod
 Version=@PROJECT_VERSION@
 Library=wetypex
 Type=SharedLibrary
-OnDemand=False
+OnDemand=True
 Configurable=True
