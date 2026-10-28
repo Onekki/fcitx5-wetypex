@@ -265,7 +265,7 @@ public:
         generation_(generation), epoch_(epoch), session_(session) {}
   void select(InputContext *ic) const override;
 };
-class WeType : public InputMethodEngine {
+class WeType : public InputMethodEngineV2 {
   friend class VMenuWord;
   Instance *instance_;
   wetype::WeChatEmoticons wechatEmoticons_{WETYPE_WECHAT_EMOTICONS};
@@ -2024,6 +2024,14 @@ public:
     }
   }
   const Configuration *getConfig() const override { return &config_; }
+  std::string subMode(const InputMethodEntry &,
+                      InputContext &ic) override {
+    return state(&ic)->english ? "en" : "中";
+  }
+  std::string subModeLabelImpl(const InputMethodEntry &,
+                               InputContext &ic) override {
+    return state(&ic)->english ? "en" : "中";
+  }
   const Configuration *
   getConfigForInputMethod(const InputMethodEntry &) const override {
     return &config_;
@@ -2311,6 +2319,9 @@ public:
         s->modifierCandidate = FcitxKey_None;
         ic->inputPanel().reset();
         panel(ic, s);
+        if (instance_->globalConfig().showInputMethodInformation())
+          instance_->showCustomInputMethodInformation(
+              ic, s->english ? "en" : "中");
         e.filterAndAccept();
       }
       return;
